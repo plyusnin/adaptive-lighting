@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import math
 import zoneinfo
 from copy import deepcopy
 from datetime import timedelta
@@ -89,7 +90,12 @@ from .adaptation_utils import (
     ServiceData,
     prepare_adaptation_data,
 )
-from .color_and_brightness import SunLightSettings
+from .color_and_brightness import (
+    DimToWarmSettings,
+    LightCapabilities,
+    SunLightSettings,
+    adjust_color_temp_for_brightness,
+)
 from .const import (
     ADAPT_BRIGHTNESS_SWITCH,
     ADAPT_COLOR_SWITCH,
@@ -110,6 +116,10 @@ from .const import (
     CONF_INTERVAL,
     CONF_LIGHTS,
     CONF_MANUAL_CONTROL,
+    CONF_DIM_TO_WARM,
+    CONF_DIM_TO_WARM_MAX_BRIGHTNESS,
+    CONF_DIM_TO_WARM_MIN_BRIGHTNESS,
+    CONF_DIM_TO_WARM_TARGET_COLOR_TEMP,
     CONF_MAX_BRIGHTNESS,
     CONF_MAX_COLOR_TEMP,
     CONF_MAX_SUNRISE_TIME,
@@ -877,6 +887,12 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         self._skip_redundant_commands = data[CONF_SKIP_REDUNDANT_COMMANDS]
         self._intercept = data[CONF_INTERCEPT]
         self._multi_light_intercept = data[CONF_MULTI_LIGHT_INTERCEPT]
+        self._dim_to_warm = data[CONF_DIM_TO_WARM]
+        self._dim_to_warm_min_brightness = data[CONF_DIM_TO_WARM_MIN_BRIGHTNESS]
+        self._dim_to_warm_max_brightness = data[CONF_DIM_TO_WARM_MAX_BRIGHTNESS]
+        self._dim_to_warm_target_color_temp = replace_none_str(
+            data[CONF_DIM_TO_WARM_TARGET_COLOR_TEMP]
+        )
         if not data[CONF_INTERCEPT] and data[CONF_MULTI_LIGHT_INTERCEPT]:
             _LOGGER.warning(
                 "%s: Config mismatch: `multi_light_intercept` set to `true` requires `intercept`"
@@ -1206,6 +1222,26 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             min_kelvin = attributes["min_color_temp_kelvin"]
             max_kelvin = attributes["max_color_temp_kelvin"]
             color_temp_kelvin = self._settings["color_temp_kelvin"]
+            if self._dim_to_warm:
+                light_capabilities = LightCapabilities(
+                    min_mireds=1_000_000 / max_kelvin,
+                    max_mireds=1_000_000 / min_kelvin,
+                )
+                dim_to_warm_settings = DimToWarmSettings(
+                    enabled=self._dim_to_warm,
+                    min_brightness=self._dim_to_warm_min_brightness,
+                    max_brightness=self._dim_to_warm_max_brightness,
+                    target_color_temp_mired=self._dim_to_warm_target_color_temp,
+                    min_color_temp_kelvin=self._sun_light_settings.min_color_temp,
+                    max_color_temp_kelvin=self._sun_light_settings.max_color_temp,
+                )
+                color_temp_mired = adjust_color_temp_for_brightness(
+                    base_color_temp_mired=self._settings["color_temp_mired"],
+                    brightness_pct=self._settings["brightness_pct"],
+                    config=dim_to_warm_settings,
+                    light_capabilities=light_capabilities,
+                )
+                color_temp_kelvin = math.floor(1_000_000 / color_temp_mired)
             color_temp_kelvin = clamp(color_temp_kelvin, min_kelvin, max_kelvin)
             service_data[ATTR_COLOR_TEMP_KELVIN] = color_temp_kelvin
         elif "color" in features and adapt_color:
