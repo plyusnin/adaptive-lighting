@@ -58,9 +58,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        if (MAJOR_VERSION, MINOR_VERSION) >= (2024, 12):
-            # https://github.com/home-assistant/core/pull/129651
-            return OptionsFlowHandler()
         return OptionsFlowHandler(config_entry)
 
 
@@ -85,16 +82,31 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle a option flow for Adaptive Lighting."""
 
     def __init__(self, *args, **kwargs) -> None:
-        """Initialize options flow."""
-        if (MAJOR_VERSION, MINOR_VERSION) >= (2024, 12):
-            super().__init__(*args, **kwargs)
-            # https://github.com/home-assistant/core/pull/129651
-        else:
-            self.config_entry = args[0]
+        """Initialize options flow.
+
+        Home Assistant has changed the OptionsFlow signature multiple times. To
+        remain compatible we:
+
+        - accept any positional/keyword arguments (``hass`` or ``config_entry``)
+        - only call the parent constructor without arguments to avoid signature
+          mismatches
+        - extract and store the config entry from either positional or keyword
+          arguments
+        """
+
+        config_entry = kwargs.get("config_entry")
+        if config_entry is None:
+            for arg in args:
+                if isinstance(arg, config_entries.ConfigEntry):
+                    config_entry = arg
+                    break
+
+        super().__init__()
+        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Handle options flow."""
-        conf = getattr(self, "config_entry", None)
+        conf = getattr(self, "config_entry", None) or getattr(self, "flow_entry", None)
         if conf is None:
             # For Home Assistant versions that populate the config entry after
             # initializing the flow (e.g., 2024.12+), look it up from the
