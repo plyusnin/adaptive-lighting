@@ -7,7 +7,10 @@ from astral.location import Location
 from homeassistant.components.adaptive_lighting.color_and_brightness import (
     SUN_EVENT_NOON,
     SUN_EVENT_SUNRISE,
+    DimToWarmSettings,
+    LightCapabilities,
     SunEvents,
+    adjust_color_temp_for_brightness,
 )
 
 # Create a mock astral_location object
@@ -208,3 +211,59 @@ def test_closest_event(tzinfo_and_location):
     event_name, ts = sun_events.closest_event(sunrise)
     assert event_name == SUN_EVENT_SUNRISE
     assert ts == location.sunrise(sunrise.date()).timestamp()
+
+
+def _dim_to_warm_config(**overrides):
+    return DimToWarmSettings(
+        enabled=True,
+        min_brightness=20,
+        max_brightness=80,
+        target_color_temp_mired=500,
+        min_color_temp_kelvin=2000,
+        max_color_temp_kelvin=5500,
+        **overrides,
+    )
+
+
+def test_adjust_color_temp_for_brightness_disabled():
+    settings = _dim_to_warm_config(enabled=False)
+    capabilities = LightCapabilities(min_mireds=150, max_mireds=500)
+    result = adjust_color_temp_for_brightness(250, 10, settings, capabilities)
+    assert result == 250
+
+
+def test_adjust_color_temp_for_brightness_full_warm():
+    settings = _dim_to_warm_config()
+    capabilities = LightCapabilities(min_mireds=150, max_mireds=500)
+    result = adjust_color_temp_for_brightness(300, 10, settings, capabilities)
+    assert result == 500
+
+
+def test_adjust_color_temp_for_brightness_full_base():
+    settings = _dim_to_warm_config()
+    capabilities = LightCapabilities(min_mireds=150, max_mireds=500)
+    result = adjust_color_temp_for_brightness(300, 90, settings, capabilities)
+    assert result == 300
+
+
+def test_adjust_color_temp_for_brightness_interpolated():
+    settings = _dim_to_warm_config()
+    capabilities = LightCapabilities(min_mireds=150, max_mireds=500)
+    result = adjust_color_temp_for_brightness(200, 50, settings, capabilities)
+    assert 200 < result < 500
+    assert pytest.approx(350, rel=0.01) == result
+
+
+def test_adjust_color_temp_for_brightness_clamped_to_capabilities():
+    settings = _dim_to_warm_config(target_color_temp_mired=800)
+    capabilities = LightCapabilities(min_mireds=160, max_mireds=400)
+    result = adjust_color_temp_for_brightness(100, 0, settings, capabilities)
+    assert result == 400
+
+
+def test_adjust_color_temp_for_brightness_clamped_to_config_limits():
+    settings = _dim_to_warm_config(target_color_temp_mired=None)
+    capabilities = LightCapabilities(min_mireds=140, max_mireds=800)
+    # Config limits allow up to 500 mireds
+    result = adjust_color_temp_for_brightness(450, 0, settings, capabilities)
+    assert result == 500

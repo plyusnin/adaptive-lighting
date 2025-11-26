@@ -113,6 +113,18 @@ The YAML and frontend configuration methods support all of the options listed be
 | `initial_transition`           | Duration of the first transition when lights turn from `off` to `on` in seconds. ⏲️                                                                                                                                                                                                                                                              | `1`            | `float` 0-6553                         |
 | `min_brightness`               | Minimum brightness percentage. 💡                                                                                                                                                                                                                                                                                                                 | `1`            | `int` 1-100                            |
 | `max_brightness`               | Maximum brightness percentage. 💡                                                                                                                                                                                                                                                                                                                 | `100`          | `int` 1-100                            |
+| `dim_to_warm`                  | Enable dim-to-warm behavior when dimming. 🔥
+
+                                                                                                                      | `False`        | `bool`                                 |
+| `dim_to_warm_min_brightness`   | Brightness percentage at which dim-to-warm is fully applied. 💡
+
+                                                                                                                      | `20`           | `int` 1-100                            |
+| `dim_to_warm_max_brightness`   | Brightness percentage at which dim-to-warm stops applying. 💡
+
+                                                                                                                      | `100`          | `int` 1-100                            |
+| `dim_to_warm_target_color_temp` | Target (warmest) color temperature in mireds when dim-to-warm is fully applied. 🔥
+
+                                                                                                                      | `None`         | `int` 100-1000 or `None`               |
 | `min_color_temp`               | Warmest color temperature in Kelvin. 🔥                                                                                                                                                                                                                                                                                                           | `2000`         | `int` 1000-10000                       |
 | `max_color_temp`               | Coldest color temperature in Kelvin. ❄️                                                                                                                                                                                                                                                                                                          | `5500`         | `int` 1000-10000                       |
 | `prefer_rgb_color`             | Whether to prefer RGB color adjustment over light color temperature when possible. 🌈                                                                                                                                                                                                                                                             | `False`        | `bool`                                 |
@@ -174,6 +186,13 @@ adaptive_lighting:
   only_once: false
 
 ```
+
+The optional **dim-to-warm** settings (`dim_to_warm`, `dim_to_warm_min_brightness`,
+`dim_to_warm_max_brightness`, and `dim_to_warm_target_color_temp`) layer an
+incandescent-like warming effect on top of the normal sun-based color
+temperature. When enabled, lights gradually shift to warmer mired values as
+brightness approaches the configured minimum and stay unchanged near the
+configured maximum.
 
 ### :hammer_and_wrench: Services
 

@@ -63,6 +63,33 @@ DOCS[CONF_MAX_BRIGHTNESS] = "Maximum brightness percentage. 💡"
 CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP = "max_color_temp", 5500
 DOCS[CONF_MAX_COLOR_TEMP] = "Coldest color temperature in Kelvin. ❄️"
 
+CONF_DIM_TO_WARM, DEFAULT_DIM_TO_WARM = "dim_to_warm", False
+DOCS[CONF_DIM_TO_WARM] = "Enable dim-to-warm behavior when dimming. 🔥"
+
+CONF_DIM_TO_WARM_MIN_BRIGHTNESS, DEFAULT_DIM_TO_WARM_MIN_BRIGHTNESS = (
+    "dim_to_warm_min_brightness",
+    20,
+)
+DOCS[CONF_DIM_TO_WARM_MIN_BRIGHTNESS] = (
+    "Brightness percentage at which dim-to-warm is fully applied. 💡"
+)
+
+CONF_DIM_TO_WARM_MAX_BRIGHTNESS, DEFAULT_DIM_TO_WARM_MAX_BRIGHTNESS = (
+    "dim_to_warm_max_brightness",
+    100,
+)
+DOCS[CONF_DIM_TO_WARM_MAX_BRIGHTNESS] = (
+    "Brightness percentage at which dim-to-warm stops applying. 💡"
+)
+
+CONF_DIM_TO_WARM_TARGET_COLOR_TEMP, DEFAULT_DIM_TO_WARM_TARGET_COLOR_TEMP = (
+    "dim_to_warm_target_color_temp",
+    NONE_STR,
+)
+DOCS[CONF_DIM_TO_WARM_TARGET_COLOR_TEMP] = (
+    "Target (warmest) color temperature in mireds when dim-to-warm is fully applied. 🔥"
+)
+
 CONF_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS = "min_brightness", 1
 DOCS[CONF_MIN_BRIGHTNESS] = "Minimum brightness percentage. 💡"
 
@@ -303,6 +330,22 @@ VALIDATION_TUPLES = [
     (CONF_INITIAL_TRANSITION, DEFAULT_INITIAL_TRANSITION, VALID_TRANSITION),
     (CONF_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS, int_between(1, 100)),
     (CONF_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS, int_between(1, 100)),
+    (CONF_DIM_TO_WARM, DEFAULT_DIM_TO_WARM, bool),
+    (
+        CONF_DIM_TO_WARM_MIN_BRIGHTNESS,
+        DEFAULT_DIM_TO_WARM_MIN_BRIGHTNESS,
+        int_between(1, 100),
+    ),
+    (
+        CONF_DIM_TO_WARM_MAX_BRIGHTNESS,
+        DEFAULT_DIM_TO_WARM_MAX_BRIGHTNESS,
+        int_between(1, 100),
+    ),
+    (
+        CONF_DIM_TO_WARM_TARGET_COLOR_TEMP,
+        DEFAULT_DIM_TO_WARM_TARGET_COLOR_TEMP,
+        vol.Any(NONE_STR, int_between(100, 1000)),
+    ),
     (CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP, int_between(1000, 10000)),
     (CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, int_between(1000, 10000)),
     (CONF_PREFER_RGB_COLOR, DEFAULT_PREFER_RGB_COLOR, bool),
