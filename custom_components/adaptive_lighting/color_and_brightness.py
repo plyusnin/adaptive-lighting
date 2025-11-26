@@ -515,3 +515,67 @@ def lerp(x, x1, x2, y1, y2):
 def clamp(value: float, minimum: float, maximum: float) -> float:
     """Clamp value between minimum and maximum."""
     return max(minimum, min(value, maximum))
+
+
+@dataclass(frozen=True)
+class LightCapabilities:
+    """Capabilities of a light related to color temperature."""
+
+    min_mireds: float
+    max_mireds: float
+
+
+@dataclass(frozen=True)
+class DimToWarmSettings:
+    """Configuration for dim-to-warm adjustments."""
+
+    enabled: bool
+    min_brightness: float
+    max_brightness: float
+    target_color_temp_mired: float | None
+    min_color_temp_kelvin: int
+    max_color_temp_kelvin: int
+
+
+def adjust_color_temp_for_brightness(
+    base_color_temp_mired: float,
+    brightness_pct: float,
+    config: DimToWarmSettings,
+    light_capabilities: LightCapabilities | None,
+) -> float:
+    """Adjust color temperature based on brightness for dim-to-warm."""
+
+    config_min_mired = 1_000_000 / config.max_color_temp_kelvin
+    config_max_mired = 1_000_000 / config.min_color_temp_kelvin
+
+    min_mired = config_min_mired
+    max_mired = config_max_mired
+
+    if light_capabilities is not None:
+        min_mired = max(min_mired, light_capabilities.min_mireds)
+        max_mired = min(max_mired, light_capabilities.max_mireds)
+
+    if min_mired > max_mired:
+        min_mired, max_mired = max_mired, min_mired
+
+    base_color_temp_mired = clamp(base_color_temp_mired, min_mired, max_mired)
+
+    warm_target_mired = config.target_color_temp_mired
+    if warm_target_mired is None:
+        warm_target_mired = max_mired
+    warm_target_mired = clamp(warm_target_mired, min_mired, max_mired)
+
+    if not config.enabled:
+        return base_color_temp_mired
+
+    b_low = config.min_brightness
+    b_high = config.max_brightness
+
+    if brightness_pct <= b_low:
+        return warm_target_mired
+    if brightness_pct >= b_high or b_high == b_low:
+        return base_color_temp_mired
+
+    fraction = (brightness_pct - b_low) / (b_high - b_low)
+    adjusted = warm_target_mired + (base_color_temp_mired - warm_target_mired) * fraction
+    return clamp(adjusted, min_mired, max_mired)

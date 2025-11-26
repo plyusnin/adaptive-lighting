@@ -94,7 +94,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """Handle options flow."""
-        conf = self.config_entry
+        conf = getattr(self, "config_entry", None)
+        if conf is None:
+            # For Home Assistant versions that populate the config entry after
+            # initializing the flow (e.g., 2024.12+), look it up from the
+            # current flow context.
+            conf = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+            self.config_entry = conf
         data = validate(conf)
         if conf.source == config_entries.SOURCE_IMPORT:
             return self.async_show_form(step_id="init", data_schema=None)
