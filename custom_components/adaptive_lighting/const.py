@@ -15,6 +15,8 @@ DOMAIN = "adaptive_lighting"
 
 DOCS = {CONF_ENTITY_ID: "Entity ID of the switch. 📝"}
 
+NONE_STR = "None"
+
 
 CONF_NAME, DEFAULT_NAME = "name", "default"
 DOCS[CONF_NAME] = "Display name for this switch. 📝"
@@ -281,7 +283,6 @@ ADAPT_COLOR_SWITCH = "adapt_color_switch"
 ADAPT_BRIGHTNESS_SWITCH = "adapt_brightness_switch"
 ATTR_ADAPTIVE_LIGHTING_MANAGER = "manager"
 UNDO_UPDATE_LISTENER = "undo_update_listener"
-NONE_STR = "None"
 ATTR_ADAPT_COLOR = "adapt_color"
 DOCS[ATTR_ADAPT_COLOR] = "Whether to adapt the color on supporting lights. 🌈"
 ATTR_ADAPT_BRIGHTNESS = "adapt_brightness"
