@@ -1257,7 +1257,7 @@ def test_attributes_have_changed():
     )
 
 
-async def test_state_change_handlers(hass):
+async def test_state_change_handlers(hass, cleanup):
     """Test AdaptiveLightingManager's EVENT_STATE_CHANGED listener.
     ======================
     Sequence of events:
@@ -1846,7 +1846,9 @@ async def test_proactive_adaptation(hass):
     state = hass.states.get(ENTITY_LIGHT_3)
     # Sun light settings use %, state only contains absolute
     assert state.attributes[ATTR_BRIGHTNESS] == 171  # == 67%
-    assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 3448
+    # warm-on-low warms the color temp towards 2000K at the adapted
+    # brightness: round(2000 + (3448 - 2000) * 0.67) == 2970.
+    assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 2970
 
 
 async def test_proactive_adaptation_with_separate_commands(hass):
@@ -1888,7 +1890,9 @@ async def test_proactive_adaptation_with_separate_commands(hass):
     # Expect adapted light state
     state = hass.states.get(ENTITY_LIGHT_3)
     assert state.attributes[ATTR_BRIGHTNESS] == 171
-    assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 3448
+    # warm-on-low warms the color temp towards 2000K at the adapted
+    # brightness: round(2000 + (3448 - 2000) * 0.67) == 2970.
+    assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 2970
 
 
 async def test_proactive_adaptation_toggle(hass):

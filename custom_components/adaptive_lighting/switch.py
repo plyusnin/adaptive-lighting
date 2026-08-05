@@ -1305,8 +1305,13 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 # Linear interpolation: 0% brightness -> 2000K, 100% -> target.
                 # The 2000K floor is intentionally hardcoded (not min_color_temp)
                 # because it is required for the plugin to function correctly.
-                color_temp_kelvin = (
-                    2000 + (color_temp_kelvin - 2000) * (brightness_pct / 100)
+                # Round to an int: ATTR_COLOR_TEMP_KELVIN is a `cv.positive_int`
+                # in HA's light.turn_on schema, so a light reports back an
+                # int-rounded value; keeping the raw float here would make our
+                # own `last_service_data` bookkeeping disagree with the actual
+                # (rounded) light state.
+                color_temp_kelvin = round(
+                    2000 + (color_temp_kelvin - 2000) * (brightness_pct / 100),
                 )
 
             color_temp_kelvin = clamp(color_temp_kelvin, min_kelvin, max_kelvin)
@@ -2688,6 +2693,17 @@ class AdaptiveLightingManager:
         """
         if is_our_context(new_on.context):
             # Our own adaptation reported back; nothing to do.
+            return
+
+        # Ignore attribute reports while one of our own commanded transitions
+        # is still running. A `light.turn_on(..., transition=N)` call makes
+        # the bulb ramp towards the target over time, and each intermediate
+        # report is a separate 'on' → 'on' state change — typically under a
+        # new, non-ours context, since it originates from the device
+        # reporting its own progress rather than from our service call. These
+        # are expected changes we caused, not a device-level manual action.
+        timer = self.transition_timers.get(entity_id)
+        if timer is not None and timer.is_running():
             return
 
         # Ignore the burst of attribute reports right after turn-on (the light
