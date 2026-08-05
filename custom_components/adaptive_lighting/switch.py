@@ -2660,6 +2660,159 @@ class AdaptiveLightingManager:
                         event,
                     )
 
+        elif old_on and new_on:
+            # Tracks 'on' → 'on' changes: a light's attributes changed while it
+            # stayed on. This is the only signal Adaptive Lighting receives when
+            # a light is controlled directly at the device level — e.g. a dimmer
+            # bound to the lamp over Zigbee Binding — because such changes never
+            # pass through a `light.turn_on` service call and so cannot be
+            # intercepted. We react immediately: mark the changed attribute as
+            # manually controlled and, for warm-on-low, re-adapt the color
+            # temperature to the new brightness right away instead of waiting
+            # for the next adaptation cycle.
+            await self._respond_to_on_to_on_event(entity_id, event, old_on, new_on)
+
+    async def _respond_to_on_to_on_event(
+        self,
+        entity_id: str,
+        event: Event[EventStateChangedData],
+        old_on: State,
+        new_on: State,
+    ) -> None:
+        """React to an external attribute change of an already-on light.
+
+        This is the only signal Adaptive Lighting receives when a light is
+        controlled directly at the device level (e.g. a dimmer bound to the lamp
+        over Zigbee Binding), since such changes never pass through
+        `light.turn_on` and so cannot be intercepted.
+        """
+        if is_our_context(new_on.context):
+            # Our own adaptation reported back; nothing to do.
+            return
+
+        # Ignore the burst of attribute reports right after turn-on (the light
+        # reporting its actual state, not a user action).
+        off_to_on = self.off_to_on_event.get(entity_id)
+        if off_to_on is not None:
+            seconds_since_on = (
+                event.time_fired - off_to_on.time_fired
+            ).total_seconds()
+            if seconds_since_on < 5:
+                return
+
+        old_brightness = old_on.attributes.get(ATTR_BRIGHTNESS)
+        new_brightness = new_on.attributes.get(ATTR_BRIGHTNESS)
+
+        # Detect a brightness change relative to the brightness Adaptive Lighting
+        # last commanded (the baseline), falling back to the previous event's
+        # value. A dimmer bound over Zigbee typically ramps the level in many
+        # small steps; each consecutive step can be below the threshold, but the
+        # divergence from the baseline accumulates and crosses it — so smooth
+        # dimming is detected, not just a single slider jump.
+        last_service_data = self.last_service_data.get(entity_id)
+        baseline_brightness = (
+            last_service_data.get(ATTR_BRIGHTNESS) if last_service_data else None
+        )
+        if baseline_brightness is None:
+            baseline_brightness = old_brightness
+        brightness_changed = (
+            new_brightness is not None
+            and baseline_brightness is not None
+            and abs(new_brightness - baseline_brightness) > BRIGHTNESS_CHANGE
+        )
+
+        old_color_temp = old_on.attributes.get(ATTR_COLOR_TEMP_KELVIN)
+        new_color_temp = new_on.attributes.get(ATTR_COLOR_TEMP_KELVIN)
+        old_rgb = old_on.attributes.get(ATTR_RGB_COLOR)
+        new_rgb = new_on.attributes.get(ATTR_RGB_COLOR)
+        color_temp_changed = (
+            old_color_temp is not None
+            and new_color_temp is not None
+            and abs(new_color_temp - old_color_temp) > COLOR_TEMP_CHANGE
+        )
+        rgb_changed = old_rgb is not None and new_rgb is not None and old_rgb != new_rgb
+
+        _LOGGER.debug(
+            "Adaptive Lighting 'on → on' change for '%s' (context.id=%s):"
+            " brightness %s→%s (baseline %s, changed=%s),"
+            " color_temp %s→%s (changed=%s), rgb_changed=%s",
+            entity_id,
+            event.context.id,
+            old_brightness,
+            new_brightness,
+            baseline_brightness,
+            brightness_changed,
+            old_color_temp,
+            new_color_temp,
+            color_temp_changed,
+            rgb_changed,
+        )
+
+        if not (brightness_changed or color_temp_changed or rgb_changed):
+            return
+
+        for switch in _switches_with_lights(self.hass, [entity_id]):
+            if not switch.is_on or not switch._take_over_control:
+                continue
+
+            if brightness_changed:
+                # The user is dimming. Honor their brightness (mark it manually
+                # controlled so Adaptive Lighting stops overwriting it) and, if
+                # color is still adaptive, re-adapt the color temperature to the
+                # new brightness immediately (warm-on-low). A color change in the
+                # same event is treated as a side effect of dimming, not a manual
+                # color action, so it must not freeze color adaptation.
+                self.add_manual_control_attributes(
+                    entity_id,
+                    LightControlAttributes.BRIGHTNESS,
+                )
+                switch.fire_manual_control_event(entity_id, event.context)
+
+                if (
+                    switch.adapt_color_switch.is_on
+                    and LightControlAttributes.COLOR
+                    not in self.get_manual_control_attributes(entity_id)
+                ):
+                    _LOGGER.debug(
+                        "%s: '%s' brightness changed externally to %s,"
+                        " re-adapting color immediately (warm-on-low)",
+                        switch._name,
+                        entity_id,
+                        new_brightness,
+                    )
+                    await switch._adapt_light(
+                        entity_id,
+                        switch.create_context(
+                            "brightness_change",
+                            parent=event.context,
+                        ),
+                        transition=0,
+                        adapt_brightness=False,
+                        adapt_color=True,
+                        force=True,
+                    )
+            elif color_temp_changed or rgb_changed:
+                # Color changed without a brightness change → a genuine manual
+                # color action, unless it merely echoes the temperature we last
+                # commanded (a delayed report of our own adaptation).
+                our_color_temp = (
+                    last_service_data.get(ATTR_COLOR_TEMP_KELVIN)
+                    if last_service_data
+                    else None
+                )
+                color_is_from_our_adaptation = (
+                    color_temp_changed
+                    and our_color_temp is not None
+                    and new_color_temp is not None
+                    and abs(new_color_temp - our_color_temp) <= COLOR_TEMP_CHANGE
+                )
+                if not color_is_from_our_adaptation:
+                    self.add_manual_control_attributes(
+                        entity_id,
+                        LightControlAttributes.COLOR,
+                    )
+                    switch.fire_manual_control_event(entity_id, event.context)
+
     async def update_manually_controlled_from_event(
         self,
         switch: AdaptiveSwitch,
