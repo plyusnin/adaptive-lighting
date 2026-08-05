@@ -16,6 +16,9 @@ import ulid_transform
 import voluptuous as vol
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_BRIGHTNESS_PCT,
+    ATTR_BRIGHTNESS_STEP,
+    ATTR_BRIGHTNESS_STEP_PCT,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_RGB_COLOR,
     ATTR_SUPPORTED_COLOR_MODES,
@@ -73,6 +76,7 @@ from homeassistant.util.color import (
 )
 
 from .adaptation_utils import (
+    BRIGHTNESS_ATTRS,
     AdaptationData,
     LightControlAttributes,
     ServiceData,
@@ -1205,8 +1209,16 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         prefer_rgb_color: bool | None = None,
         force: bool = False,
         context: Context | None = None,
+        brightness_override: int | None = None,
     ) -> AdaptationData | None:
-        """Prepare `AdaptationData` for adapting a light."""
+        """Prepare `AdaptationData` for adapting a light.
+
+        `brightness_override` (0-255), when given, is the brightness the light
+        will actually end up at (e.g. from an intercepted `turn_on` where the
+        user explicitly requested a brightness). It is honored as-is instead of
+        the adaptive target and is used to pick a matching color temperature
+        (warm-on-low).
+        """
         adaptation_attributes = self.manager.get_adaption_control_attributes(
             self,
             light,
@@ -1247,7 +1259,11 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         if use_transition:
             service_data[ATTR_TRANSITION] = transition
 
-        if "brightness" in features and adapt_brightness:
+        if "brightness" in features and adapt_brightness and brightness_override is None:
+            # When a brightness_override is given (e.g. an intercepted turn_on
+            # where the user explicitly requested a brightness), honor that
+            # value instead of overwriting it with the adaptive target. The
+            # override is still used below to pick a matching color temperature.
             brightness = round(255 * self._settings["brightness_pct"] / 100)
             service_data[ATTR_BRIGHTNESS] = brightness
 
@@ -1269,6 +1285,30 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             min_kelvin = attributes["min_color_temp_kelvin"]
             max_kelvin = attributes["max_color_temp_kelvin"]
             color_temp_kelvin = self._settings["color_temp_kelvin"]
+
+            # warm-on-low: make the color temperature warmer at low brightness.
+            # Determine the brightness the light will end up at, by priority:
+            #   1. an explicit brightness_override (intercepted turn_on),
+            #   2. the adaptive brightness target (when adapting brightness),
+            #   3. the light's current brightness (when only color is adapted).
+            brightness_pct: float | None = None
+            if brightness_override is not None:
+                brightness_pct = (brightness_override / 255) * 100
+            elif adapt_brightness:
+                brightness_pct = self._settings["brightness_pct"]
+            elif state.state == STATE_ON:
+                current_brightness = attributes.get(ATTR_BRIGHTNESS)
+                if current_brightness is not None:
+                    brightness_pct = (current_brightness / 255) * 100
+
+            if brightness_pct is not None:
+                # Linear interpolation: 0% brightness -> 2000K, 100% -> target.
+                # The 2000K floor is intentionally hardcoded (not min_color_temp)
+                # because it is required for the plugin to function correctly.
+                color_temp_kelvin = (
+                    2000 + (color_temp_kelvin - 2000) * (brightness_pct / 100)
+                )
+
             color_temp_kelvin = clamp(color_temp_kelvin, min_kelvin, max_kelvin)
             service_data[ATTR_COLOR_TEMP_KELVIN] = color_temp_kelvin
         elif "color" in features and adapt_color:
@@ -2096,9 +2136,34 @@ class AdaptiveLightingManager:
         for eid in entity_ids:
             self.clear_proactively_adapting(eid)
 
+        # warm-on-low: if the intercepted turn_on explicitly sets a brightness,
+        # resolve it to an absolute 0-255 value and pass it as an override so the
+        # adapted color temperature matches the requested brightness.
+        params = data[CONF_PARAMS]
+        brightness_override: int | None = None
+        for attr in BRIGHTNESS_ATTRS:
+            if attr not in params:
+                continue
+            if attr == ATTR_BRIGHTNESS:
+                brightness_override = params[attr]
+            elif attr == ATTR_BRIGHTNESS_PCT:
+                brightness_override = round(255 * params[attr] / 100)
+            elif attr in (ATTR_BRIGHTNESS_STEP, ATTR_BRIGHTNESS_STEP_PCT):
+                state = self.hass.states.get(entity_ids[0])
+                if state is not None and state.state == STATE_ON:
+                    current = state.attributes.get(ATTR_BRIGHTNESS, 128)
+                    step = (
+                        params[attr]
+                        if attr == ATTR_BRIGHTNESS_STEP
+                        else round(255 * params[attr] / 100)
+                    )
+                    brightness_override = max(0, min(255, current + step))
+            break
+
         adaptation_data = await switch.prepare_adaptation_data(
             entity_ids[0],
             transition,
+            brightness_override=brightness_override,
         )
         if adaptation_data is None:
             return
