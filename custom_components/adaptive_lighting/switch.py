@@ -60,6 +60,7 @@ from homeassistant.core import (
     State,
     callback,
 )
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform, entity_registry
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_component import async_update_entity
@@ -136,6 +137,8 @@ from .const import (
     CONF_USE_DEFAULTS,
     DOMAIN,
     EXTRA_VALIDATION,
+    FADE_IN_BRIGHTNESS,
+    FADE_IN_STATE_TIMEOUT,
     ICON_BRIGHTNESS,
     ICON_COLOR_TEMP,
     ICON_MAIN,
@@ -377,6 +380,82 @@ async def handle_change_switch_settings(
         )
 
 
+async def _async_fade_in_from_zero(
+    hass: HomeAssistant,
+    manager: AdaptiveLightingManager,
+    light: str,
+    service_call: ServiceCall,
+) -> None:
+    """Turn 'light' on at the lowest brightness, so it can be faded in.
+
+    Returns once the light reports 'on', so that the adaptation which follows
+    sees the light on and at a known brightness. Waiting for the state (instead
+    of for a fixed amount of time) also means the manager has recorded the
+    'off' → 'on' event of this turn on before the adaptation adds another state
+    change, which is what keeps the two apart in its bookkeeping.
+
+    Failures are contained to 'light': the adaptation of every light (including
+    this one, which is then simply not faded in) still happens.
+    """
+    context = manager.create_context("fade_in", parent=service_call.context)
+    # Mark the turn on as proactive, exactly like the adaptations of
+    # `adaptive_lighting.apply` and an intercepted `light.turn_on` do, so the
+    # resulting 'off' → 'on' event is not handled as an external turn on (which
+    # would adapt the light with `initial_transition` and mark it as manually
+    # controlled). Registering the context before the service call guarantees it
+    # is known by the time the event is handled.
+    manager.set_proactively_adapting(context.id, light)
+    service_data = {
+        ATTR_ENTITY_ID: light,
+        ATTR_BRIGHTNESS: FADE_IN_BRIGHTNESS,
+        ATTR_TRANSITION: 0,
+    }
+    _LOGGER.debug(
+        "Fading in '%s' from zero with '%s' and context.id='%s'",
+        light,
+        service_data,
+        context.id,
+    )
+
+    turned_on = asyncio.Event()
+
+    @callback
+    def _async_light_reported_on(event: Event[EventStateChangedData]) -> None:
+        new_state = event.data["new_state"]
+        if new_state is not None and new_state.state == STATE_ON:
+            turned_on.set()
+
+    remove_listener = async_track_state_change_event(
+        hass,
+        [light],
+        _async_light_reported_on,
+    )
+    try:
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            service_data,
+            context=context,
+            blocking=True,
+        )
+        if not is_on(hass, light):
+            # Most lights write their state before the service call returns, in
+            # which case this does not wait at all.
+            async with asyncio.timeout(FADE_IN_STATE_TIMEOUT):
+                await turned_on.wait()
+    except (TimeoutError, HomeAssistantError, vol.Invalid):
+        # The light did not turn on (or did not report it). Undo the bookkeeping
+        # so the adaptation below is the turn on, and handled as such.
+        manager.clear_proactively_adapting(light)
+        _LOGGER.warning(
+            "Failed to fade in '%s' from zero, adapting it without fading",
+            light,
+            exc_info=True,
+        )
+    finally:
+        remove_listener()
+
+
 async def async_setup_entry(  # noqa: PLR0915
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -486,6 +565,22 @@ async def async_setup_entry(  # noqa: PLR0915
         for light in off_lights:
             manager.clear_proactively_adapting(light)
             manager.reset(light, reset_manual_control=False)
+
+        # Fade the lights that this call turns on in from zero: an 'off' light
+        # has an effective brightness of 0, but lights turn on at their own
+        # retained level, so the adaptation below would fade from an unknown
+        # brightness (or not fade at all). Turning them on at the lowest
+        # brightness first, without transition, makes the adaptation a fade in.
+        # This is a property of the light, not of the switch, so it happens once
+        # per light even when several switches share it.
+        if data[CONF_TRANSITION] > 0 and data[ATTR_ADAPT_BRIGHTNESS]:
+            for light in off_lights:
+                features = _supported_features(hass, light)
+                if not {"brightness", "transition"} <= features:
+                    # Without one of these the adaptation below cannot fade the
+                    # brightness, so turning on at 1 first would only flash.
+                    continue
+                await _async_fade_in_from_zero(hass, manager, light, service_call)
 
         for switch, light in work_items:
             context = switch.create_context(

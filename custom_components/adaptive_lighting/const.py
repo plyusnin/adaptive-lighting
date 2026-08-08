@@ -299,6 +299,18 @@ DOCS[CONF_USE_DEFAULTS] = (
 
 TURNING_OFF_DELAY = 5
 
+# An 'off' light has an effective brightness of 0, but lights turn on at their
+# own retained level. To fade one in from zero, `adaptive_lighting.apply` first
+# turns it on at the lowest brightness the hardware can show, without
+# transition, and only then sends the adaptive target with the transition.
+FADE_IN_BRIGHTNESS = 1
+
+# Upper bound (seconds) for how long to wait for a light to report 'on' after
+# the fade-in turn on. This is not a sequencing delay: the wait ends as soon as
+# the state arrives (usually immediately, i.e. without ever suspending). It only
+# keeps a light that never reports back from blocking the service call forever.
+FADE_IN_STATE_TIMEOUT = 5
+
 DOCS_MANUAL_CONTROL = {
     CONF_ENTITY_ID: "The `entity_id` of the switch in which to (un)mark the "
     "light as being `manually controlled`. 📝",

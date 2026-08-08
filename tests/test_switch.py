@@ -28,6 +28,7 @@ from homeassistant.components.adaptive_lighting.const import (
     ADAPT_BRIGHTNESS_SWITCH,
     ADAPT_COLOR_SWITCH,
     ATTR_ADAPTIVE_LIGHTING_MANAGER,
+    ATTR_ADAPT_BRIGHTNESS,
     CONF_ADAPT_ONLY_ON_BARE_TURN_ON,
     CONF_ADAPT_UNTIL_SLEEP,
     CONF_AUTORESET_CONTROL,
@@ -120,7 +121,7 @@ from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.setup import async_setup_component
 from homeassistant.util.color import color_temperature_mired_to_kelvin
 
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, async_capture_events
 
 # HA 2026.6 removed the legacy `light: platform: template` YAML format
 # (home-assistant/core#169615); use the modern `template:` format there.
@@ -1154,6 +1155,17 @@ def _transitions(patched_async_turn_on) -> list[float]:
     ]
 
 
+def _brightness_transitions(patched_async_turn_on) -> list[tuple[int | None, float]]:
+    """Return (brightness, transition) of every 'async_turn_on' call.
+
+    A missing brightness is reported as `None` and a missing transition as -1.
+    """
+    return [
+        (call.kwargs.get(ATTR_BRIGHTNESS), call.kwargs.get(ATTR_TRANSITION, -1))
+        for call in patched_async_turn_on.call_args_list
+    ]
+
+
 async def test_apply_turn_on_keeps_requested_transition(hass, cleanup):
     """Test that `adaptive_lighting.apply` does not re-adapt with `initial_transition`.
 
@@ -1195,13 +1207,15 @@ async def test_apply_turn_on_keeps_requested_transition(hass, cleanup):
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
     assert not _proactive_contexts(switch, ENTITY_LIGHT_3)
 
-    # With 'turn_on_lights' the light is turned on by exactly one adaptation,
-    # using the transition of the service call. A second call (with
+    # With 'turn_on_lights' the light is prelighted (`transition: 0`, see
+    # `test_apply_fades_in_off_light_from_zero`) and then adapted exactly once,
+    # using the transition of the service call. A third call (with
     # `initial_transition`) would mean the 'off' → 'on' event was handled as an
     # external `light.turn_on`.
-    assert await apply(**{CONF_TURN_ON_LIGHTS: True}) == [456]
+    assert await apply(**{CONF_TURN_ON_LIGHTS: True}) == [0, 456]
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
-    assert len(_proactive_contexts(switch, ENTITY_LIGHT_3)) == 1
+    # The prelight and the adaptation each register a proactive context
+    assert len(_proactive_contexts(switch, ENTITY_LIGHT_3)) == 2
 
     # Cleanup
     switch.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
@@ -1259,18 +1273,214 @@ async def test_apply_two_switches_sharing_an_off_light(hass, cleanup):
         await hass.async_block_till_done()
 
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
-    # One adaptation per targeted switch, all with the transition of the call
-    assert _transitions(patched_async_turn_on) == [456, 456]
+    # One prelight for the light, then one adaptation per targeted switch, all
+    # with the transition of the call
+    assert _transitions(patched_async_turn_on) == [0, 456, 456]
     # Both contexts must still be registered, and only of the targeted switches
+    # (next to the prelight context, which belongs to the shared manager)
     contexts = _proactive_contexts(switch1, ENTITY_LIGHT_3)
-    assert len(contexts) == 2, contexts
+    assert len(contexts) == 3, contexts
     assert _context_switch_hashes(contexts) == {
+        short_hash("manager"),
         short_hash("switch1"),
         short_hash("switch2"),
     }
 
     # Cleanup
     switch1.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+
+
+async def test_apply_fades_in_off_light_from_zero(hass, cleanup):
+    """Test that `adaptive_lighting.apply` fades an 'off' light in from zero.
+
+    An 'off' light has an effective brightness of 0, but many lights (e.g. IKEA
+    KAJPLATS) turn on at their own retained level, so a single `light.turn_on`
+    with the adaptive target and a transition starts the fade from an unknown
+    brightness — or does not fade at all. When `apply` turns a light on with a
+    transition, it therefore first turns it on at brightness 1 with
+    `transition: 0` and only then sends the adaptive target with the requested
+    transition.
+
+    The extra turn on must not be treated as an external `light.turn_on`, which
+    would adapt the light a second time with `initial_transition`.
+    """
+    switch, (*_, light3) = await setup_lights_and_switch(
+        hass,
+        {CONF_INITIAL_TRANSITION: 123},
+        all_lights=True,
+    )
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+
+    async def apply(**kwargs):
+        with patch.object(
+            light3,
+            "async_turn_on",
+            wraps=light3.async_turn_on,
+        ) as patched_async_turn_on:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_APPLY,
+                {
+                    ATTR_ENTITY_ID: switch.entity_id,
+                    CONF_LIGHTS: [ENTITY_LIGHT_3],
+                    CONF_TRANSITION: 456,
+                    CONF_TURN_ON_LIGHTS: True,
+                    **kwargs,
+                },
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+        return _brightness_transitions(patched_async_turn_on)
+
+    calls = await apply()
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
+    assert len(calls) == 2, calls
+    # Fade in from the lowest level the hardware can show, without transition
+    assert calls[0] == (1, 0), calls
+    # ... and only then the adaptive target, with the requested transition
+    adaptive_brightness, adaptive_transition = calls[1]
+    assert adaptive_transition == 456, calls
+    assert adaptive_brightness not in (None, 1), calls
+    # An adaptation with `initial_transition` would mean the 'off' → 'on' event
+    # of the fade-in was handled as an external `light.turn_on`
+    assert 123 not in [transition for _, transition in calls], calls
+
+    # A light that is already on keeps its brightness, it is only adapted
+    assert await apply() == [(adaptive_brightness, 456)]
+
+    # Cleanup
+    switch.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+
+
+async def test_apply_fade_in_is_sequenced_and_stays_adaptive(hass, cleanup):
+    """Test how the fade-in of `adaptive_lighting.apply` is sequenced and tracked.
+
+    The adaptation must only be sent once the light reports 'on' at the fade-in
+    brightness, otherwise it would still fade from an unknown level — exactly
+    what the fade-in avoids.
+
+    And because the fade-in is a `light.turn_on` like any other, it must be
+    recognized as ours everywhere the manager tracks turn ons. Otherwise it is
+    taken for an external turn on, which marks the light as manually controlled
+    and stops Adaptive Lighting from adapting it. This is checked with the
+    service call interceptor and `take_over_control` enabled, i.e., along the
+    same paths as in a real installation.
+    """
+    switch, (*_, light3) = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_INITIAL_TRANSITION: 123,
+            CONF_INTERCEPT: True,
+            CONF_TAKE_OVER_CONTROL: True,
+            CONF_DETECT_NON_HA_CHANGES: True,
+        },
+        all_lights=True,
+    )
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+    manual_control_events = async_capture_events(hass, f"{DOMAIN}.manual_control")
+
+    # Record the state of the light as seen at the start of every 'turn on',
+    # and make the light report its new state only after the service call
+    # returned — like a light whose state arrives with a later device report.
+    seen: list[str] = []
+    async_turn_on = light3.async_turn_on
+
+    async def record_state_and_turn_on_later(**kwargs):
+        seen.append(hass.states.get(ENTITY_LIGHT_3).state)
+
+        async def turn_on_later() -> None:
+            await asyncio.sleep(0.05)
+            await async_turn_on(**kwargs)
+            light3.async_write_ha_state()
+
+        hass.async_create_background_task(turn_on_later(), "turn_on_later")
+
+    with patch.object(
+        light3,
+        "async_turn_on",
+        side_effect=record_state_and_turn_on_later,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_APPLY,
+            {
+                ATTR_ENTITY_ID: switch.entity_id,
+                CONF_LIGHTS: [ENTITY_LIGHT_3],
+                CONF_TRANSITION: 456,
+                CONF_TURN_ON_LIGHTS: True,
+            },
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    # The fade-in starts from 'off' and the adaptation only follows once the
+    # light reports 'on' (it is sent at the fade-in brightness, which
+    # `test_apply_fades_in_off_light_from_zero` checks)
+    assert seen == [STATE_OFF, STATE_ON], seen
+    # The fade-in is ours, so it never counts as taking over control
+    assert not manual_control_events
+    assert (
+        switch.manager.get_manual_control_attributes(ENTITY_LIGHT_3)
+        == LightControlAttributes.NONE
+    )
+
+    # Cleanup
+    switch.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+
+
+async def test_apply_does_not_fade_in_when_there_is_nothing_to_fade(hass, cleanup):
+    """Test when `adaptive_lighting.apply` does not fade an 'off' light in.
+
+    Turning a light on at brightness 1 first is only useful when the adaptation
+    that follows actually fades the brightness. Without a transition, or when the
+    brightness is not adapted at all, it would only add a visible flash.
+    """
+    switch, (*_, light3) = await setup_lights_and_switch(
+        hass,
+        {CONF_INITIAL_TRANSITION: 123},
+        all_lights=True,
+    )
+
+    async def apply(**kwargs):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_OFF,
+            {ATTR_ENTITY_ID: ENTITY_LIGHT_3},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+        with patch.object(
+            light3,
+            "async_turn_on",
+            wraps=light3.async_turn_on,
+        ) as patched_async_turn_on:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_APPLY,
+                {
+                    ATTR_ENTITY_ID: switch.entity_id,
+                    CONF_LIGHTS: [ENTITY_LIGHT_3],
+                    CONF_TURN_ON_LIGHTS: True,
+                    **kwargs,
+                },
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+        switch.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+        return _brightness_transitions(patched_async_turn_on)
+
+    # Without a transition there is nothing to fade, so the light is turned on
+    # at its adaptive brightness right away
+    calls = await apply(**{CONF_TRANSITION: 0})
+    assert len(calls) == 1, calls
+    assert calls[0][0] not in (None, 1), calls
+
+    # The brightness is not adapted, so turning on at brightness 1 would leave
+    # the light at brightness 1
+    calls = await apply(**{CONF_TRANSITION: 456, ATTR_ADAPT_BRIGHTNESS: False})
+    assert len(calls) == 1, calls
+    assert calls[0][0] is None, calls
 
 
 async def test_switch_off_on_off(hass):
