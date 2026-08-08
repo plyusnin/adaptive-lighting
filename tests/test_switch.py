@@ -1132,6 +1132,147 @@ async def test_apply_service(hass):
     assert old_state[ATTR_COLOR_TEMP_KELVIN] == new_state[ATTR_COLOR_TEMP_KELVIN]
 
 
+def _proactive_contexts(switch: AdaptiveSwitch, light: str) -> list[str]:
+    """Return the registered proactively adapting context ids of 'light'."""
+    return [
+        context_id
+        for context_id, entity_id in switch.manager._proactively_adapting_contexts.items()
+        if entity_id == light
+    ]
+
+
+def _context_switch_hashes(context_ids: list[str]) -> set[str]:
+    """Return the `short_hash`-ed switch names that created 'context_ids'."""
+    return {context_id.split(":")[2] for context_id in context_ids}
+
+
+def _transitions(patched_async_turn_on) -> list[float]:
+    """Return the transition of every 'async_turn_on' call, -1 if it has none."""
+    return [
+        call.kwargs.get(ATTR_TRANSITION, -1)
+        for call in patched_async_turn_on.call_args_list
+    ]
+
+
+async def test_apply_turn_on_keeps_requested_transition(hass, cleanup):
+    """Test that `adaptive_lighting.apply` does not re-adapt with `initial_transition`.
+
+    Turning on an 'off' light with `adaptive_lighting.apply` must be registered as
+    a proactive adaptation, just like an intercepted `light.turn_on`. Otherwise the
+    resulting 'off' → 'on' event is treated as an external turn on, which resets the
+    light and adapts a second time with `initial_transition`, replacing the
+    transition passed to the service call.
+    """
+    switch, (*_, light3) = await setup_lights_and_switch(
+        hass,
+        {CONF_INITIAL_TRANSITION: 123},
+        all_lights=True,
+    )
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+
+    async def apply(**kwargs):
+        with patch.object(
+            light3,
+            "async_turn_on",
+            wraps=light3.async_turn_on,
+        ) as patched_async_turn_on:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_APPLY,
+                {
+                    ATTR_ENTITY_ID: switch.entity_id,
+                    CONF_LIGHTS: [ENTITY_LIGHT_3],
+                    CONF_TRANSITION: 456,
+                    **kwargs,
+                },
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+        return _transitions(patched_async_turn_on)
+
+    # Without 'turn_on_lights' an 'off' light is skipped entirely
+    assert await apply() == []
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+    assert not _proactive_contexts(switch, ENTITY_LIGHT_3)
+
+    # With 'turn_on_lights' the light is turned on by exactly one adaptation,
+    # using the transition of the service call. A second call (with
+    # `initial_transition`) would mean the 'off' → 'on' event was handled as an
+    # external `light.turn_on`.
+    assert await apply(**{CONF_TURN_ON_LIGHTS: True}) == [456]
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
+    assert len(_proactive_contexts(switch, ENTITY_LIGHT_3)) == 1
+
+    # Cleanup
+    switch.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+
+
+async def test_apply_two_switches_sharing_an_off_light(hass, cleanup):
+    """Test `adaptive_lighting.apply` with three switches that share an 'off' light.
+
+    Only the two switches passed to the service call adapt the light, and each of
+    them registers its own proactively adapting context: no switch may clear the
+    context that another switch just registered. The third switch owns the light
+    too, but is not passed to the service call, so it must not adapt it: the
+    proactive context makes the (shared) manager skip the 'off' → 'on' event for
+    every switch, exactly like an intercepted `light.turn_on` does.
+    """
+    lights = await setup_lights(hass)
+    light3 = lights[2]
+    defaults = {
+        CONF_SUNRISE_TIME: datetime.time(SUNRISE.hour),
+        CONF_SUNSET_TIME: datetime.time(SUNSET.hour),
+        CONF_INITIAL_TRANSITION: 123,
+        CONF_TRANSITION: 0,
+        CONF_DETECT_NON_HA_CHANGES: True,
+        CONF_PREFER_RGB_COLOR: False,
+        CONF_MIN_COLOR_TEMP: 2500,  # to not coincide with sleep_color_temp
+    }
+    switches = []
+    for name in ("switch1", "switch2", "switch3"):
+        _, switch = await setup_switch(
+            hass,
+            {CONF_NAME: name, CONF_LIGHTS: [ENTITY_LIGHT_3], **defaults},
+        )
+        switches.append(switch)
+    switch1, switch2, switch3 = switches
+    assert switch3.is_on
+    assert ENTITY_LIGHT_3 in switch3.lights
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+
+    with patch.object(
+        light3,
+        "async_turn_on",
+        wraps=light3.async_turn_on,
+    ) as patched_async_turn_on:
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_APPLY,
+            {
+                # Note that `switch3` is deliberately not passed here
+                ATTR_ENTITY_ID: [switch1.entity_id, switch2.entity_id],
+                CONF_TURN_ON_LIGHTS: True,
+                CONF_TRANSITION: 456,
+            },
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
+    # One adaptation per targeted switch, all with the transition of the call
+    assert _transitions(patched_async_turn_on) == [456, 456]
+    # Both contexts must still be registered, and only of the targeted switches
+    contexts = _proactive_contexts(switch1, ENTITY_LIGHT_3)
+    assert len(contexts) == 2, contexts
+    assert _context_switch_hashes(contexts) == {
+        short_hash("switch1"),
+        short_hash("switch2"),
+    }
+
+    # Cleanup
+    switch1.manager.cancel_ongoing_adaptation_calls(ENTITY_LIGHT_3)
+
+
 async def test_switch_off_on_off(hass):
     """Test switch rapid off_on_off."""
 

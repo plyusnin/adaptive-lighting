@@ -457,6 +457,14 @@ async def async_setup_entry(  # noqa: PLR0915
         )
         switches = _switches_from_service_call(hass, service_call)
         lights = data[CONF_LIGHTS]
+        # Collect all work first and remember which lights are currently off,
+        # because those are turned on by this service call and therefore need
+        # the same treatment as an intercepted `light.turn_on` below. This loop
+        # does not await, so the 'off' snapshot is consistent for the whole call.
+        # Note that all switches share `manager` (it is created once per `hass`),
+        # which is why the proactive bookkeeping below can use it directly.
+        work_items: list[tuple[AdaptiveSwitch, str]] = []
+        off_lights: set[str] = set()
         for switch in switches:
             if not lights:
                 all_lights = switch.lights
@@ -464,20 +472,41 @@ async def async_setup_entry(  # noqa: PLR0915
                 all_lights = _expand_light_groups(hass, lights)
             switch.manager.lights.update(all_lights)
             for light in all_lights:
-                if data[CONF_TURN_ON_LIGHTS] or is_on(hass, light):
-                    context = switch.create_context(
-                        "service",
-                        parent=service_call.context,
-                    )
-                    await switch._adapt_light(  # pylint: disable=protected-access
-                        light,
-                        context=context,
-                        transition=data[CONF_TRANSITION],
-                        adapt_brightness=data[ATTR_ADAPT_BRIGHTNESS],
-                        adapt_color=data[ATTR_ADAPT_COLOR],
-                        prefer_rgb_color=data[CONF_PREFER_RGB_COLOR],
-                        force=True,
-                    )
+                if not is_on(hass, light):
+                    if not data[CONF_TURN_ON_LIGHTS]:
+                        continue
+                    off_lights.add(light)
+                work_items.append((switch, light))
+
+        # Reset the lights that we are about to turn on (like
+        # `_service_interceptor_turn_on_single_light_handler` does), before
+        # registering any adaptation as proactive. Otherwise a switch would
+        # clear the context that another switch, sharing the same light, just
+        # registered.
+        for light in off_lights:
+            manager.clear_proactively_adapting(light)
+            manager.reset(light, reset_manual_control=False)
+
+        for switch, light in work_items:
+            context = switch.create_context(
+                "service",
+                parent=service_call.context,
+            )
+            if light in off_lights:
+                # Mark the adaptation as proactive, such that the resulting
+                # 'off' → 'on' event is not treated as an external
+                # `light.turn_on`, which would reset the light and adapt a
+                # second time with `initial_transition`.
+                manager.set_proactively_adapting(context.id, light)
+            await switch._adapt_light(  # pylint: disable=protected-access
+                light,
+                context=context,
+                transition=data[CONF_TRANSITION],
+                adapt_brightness=data[ATTR_ADAPT_BRIGHTNESS],
+                adapt_color=data[ATTR_ADAPT_COLOR],
+                prefer_rgb_color=data[CONF_PREFER_RGB_COLOR],
+                force=True,
+            )
 
     @callback
     async def handle_set_manual_control(service_call: ServiceCall) -> None:

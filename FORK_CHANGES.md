@@ -14,9 +14,9 @@
 - Ветка **смержена с `upstream/main`** (merge-коммит «Merge upstream/main: adopt
   enum-based individual manual control (#1356)»).
 
-После мержа форк отличается от upstream **только одной функциональной фичей**
-(`warm-on-low`) плюс несколькими вспомогательными файлами. Команда для актуального
-списка отличий:
+После мержа форк отличается от upstream **одной функциональной фичей**
+(`warm-on-low`), одним багфиксом (`adaptive_lighting.apply` и transition) плюс
+несколькими вспомогательными файлами. Команда для актуального списка отличий:
 
 ```powershell
 git diff upstream/main HEAD -- custom_components/adaptive_lighting/switch.py
@@ -72,6 +72,60 @@ git diff upstream/main HEAD -- custom_components/adaptive_lighting/switch.py
 `prepare_adaptation_data` берёт текущую яркость лампы и подбирает под неё тёплый цвет.
 Метод из п.7 делает это **мгновенно**, не дожидаясь цикла.
 
+## Багфикс: `adaptive_lighting.apply` и transition
+
+`handle_apply` при `turn_on_lights: true` включает погашенную лампу напрямую через
+`_adapt_light`, но (в upstream) не регистрирует эту адаптацию как **проактивную**.
+Из-за этого возникающее событие `off` → `on` считается внешним `light.turn_on`:
+выполняется `reset()` (отменяющий текущую адаптацию) и вторая адаптация с
+`initial_transition`, которая перетирает transition из вызова сервиса.
+
+Исправление в `handle_apply` (симметрично перехватчику `light.turn_on`):
+
+1. Сначала собираются все пары «switch → лампа» и запоминаются лампы, которые
+   **на момент вызова были выключены** (`is_on` проверяется один раз, до адаптаций).
+2. Для каждой такой лампы **один раз** вызываются `clear_proactively_adapting` и
+   `reset(reset_manual_control=False)` — **до** любых новых регистраций, иначе
+   второй switch, владеющий той же лампой, стёр бы контекст, только что
+   зарегистрированный первым.
+3. Затем для каждой пары создаётся контекст `"service"`, и если лампа была
+   выключена — он регистрируется через `set_proactively_adapting` перед вызовом
+   `_adapt_light`.
+
+Набор выполняемой работы не меняется: условие `turn_on_lights or is_on` просто
+вычисляется один раз заранее (в фазе 1 нет `await`, поэтому снимок консистентен).
+Поведение для `turn_on_lights: false`, уже включённых ламп и групп прежнее.
+
+**Что меняется намеренно.** `_proactively_adapting_contexts` живёт в общем
+(одном на `hass`) менеджере, а проверка проактивности стоит в *глобальном*
+обработчике `state_changed_event_listener` до цикла по switch'ам. Поэтому
+зарегистрированный контекст подавляет обработку события `off` → `on` **для всех**
+switch'ей, владеющих лампой, — в том числе для тех, которые в вызов сервиса не
+передавались. Раньше такой «непричастный» switch тоже адаптировал лампу с
+`initial_transition`. Теперь лампу адаптируют только switch'и из вызова.
+
+Это ровно та же семантика, что и у перехваченного `light.turn_on`
+(`_service_interceptor_turn_on_single_light_handler`): там контекст регистрируется
+так же и событие `off` → `on` так же подавляется для всех владельцев. То есть
+изменение восстанавливает симметрию двух путей включения, а не вводит новое
+правило. Побочный эффект: для ламп, включённых через `apply`, пропускается и
+защита `just_turned_off` от быстрой последовательности `off` → `on` → `off` —
+в пути перехвата она пропускается точно так же.
+
+Тесты: `test_apply_turn_on_keeps_requested_transition` (включая пропуск лампы при
+`turn_on_lights: false`), `test_apply_two_switches_sharing_an_off_light` (третий
+switch-владелец, не переданный в вызов, лампу не адаптирует).
+
+**Известное ограничение (осознанное).** Если `_adapt_light` выйдет, не включив
+лампу (занят `turn_off_lock` или `prepare_adaptation_data` вернул `None`),
+зарегистрированный контекст останется в `_proactively_adapting_contexts`. Это
+безвредно: id контекстов уникальны, поэтому «повиснувшая» запись никогда не
+совпадёт с чужим событием, а число таких записей на лампу ограничено числом
+switch'ей — каждый следующий вызов (и перехваченный `light.turn_on`) начинается
+с `clear_proactively_adapting`. Чистить запись по факту «лампа всё ещё выключена»
+нельзя: адаптация асинхронная, и это вернуло бы исходную гонку. В пути перехвата
+ровно то же поведение.
+
 ## Вспомогательные файлы (не код компонента)
 
 - **`.github/copilot-instructions.md`** — инструкции для AI-ассистентов.
@@ -109,6 +163,9 @@ git merge upstream/main
    Зависит от upstream-API: `add_manual_control_attributes`,
    `get_manual_control_attributes`, `fire_manual_control_event`,
    `LightControlAttributes`, `_adapt_light(adapt_brightness=, adapt_color=)`.
+6. **`handle_apply`** — двухфазная схема (сбор работы + снимок выключенных ламп,
+   затем `clear_proactively_adapting`/`reset` и регистрация проактивных контекстов).
+   Зависит от upstream-API: `set_proactively_adapting`, `clear_proactively_adapting`.
 
 Если upstream сильно переработает `prepare_adaptation_data`, перехватчик или
 `state_changed_event_listener` — перенести эти врезки заново (они изолированы;
