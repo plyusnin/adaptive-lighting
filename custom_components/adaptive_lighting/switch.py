@@ -407,7 +407,7 @@ async def _async_fade_in_from_zero(
     manager.set_proactively_adapting(context.id, light)
     service_data = {
         ATTR_ENTITY_ID: light,
-        ATTR_BRIGHTNESS: FADE_IN_BRIGHTNESS,
+        ATTR_BRIGHTNESS_PCT: FADE_IN_BRIGHTNESS,
         ATTR_TRANSITION: 0,
     }
     _LOGGER.debug(

@@ -1310,6 +1310,7 @@ async def test_apply_fades_in_off_light_from_zero(hass, cleanup):
         all_lights=True,
     )
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+    service_calls = async_capture_events(hass, EVENT_CALL_SERVICE)
 
     async def apply(**kwargs):
         with patch.object(
@@ -1335,8 +1336,20 @@ async def test_apply_fades_in_off_light_from_zero(hass, cleanup):
     calls = await apply()
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
     assert len(calls) == 2, calls
-    # Fade in from the lowest level the hardware can show, without transition
-    assert calls[0] == (1, 0), calls
+    # Fade in from the lowest level the hardware can show, without transition.
+    # The payload uses `brightness_pct`, which every light accepts, instead of
+    # the raw 0-255 `brightness` scale.
+    turn_ons = [
+        event.data["service_data"]
+        for event in service_calls
+        if event.data["domain"] == LIGHT_DOMAIN
+        and event.data["service"] == SERVICE_TURN_ON
+    ]
+    assert turn_ons, service_calls
+    fade_in_data = turn_ons[0]
+    assert fade_in_data.get(ATTR_BRIGHTNESS_PCT) == 1, fade_in_data
+    assert ATTR_BRIGHTNESS not in fade_in_data, fade_in_data
+    assert calls[0][1] == 0, calls
     # ... and only then the adaptive target, with the requested transition
     adaptive_brightness, adaptive_transition = calls[1]
     assert adaptive_transition == 456, calls

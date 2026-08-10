@@ -301,8 +301,9 @@ TURNING_OFF_DELAY = 5
 
 # An 'off' light has an effective brightness of 0, but lights turn on at their
 # own retained level. To fade one in from zero, `adaptive_lighting.apply` first
-# turns it on at the lowest brightness the hardware can show, without
-# transition, and only then sends the adaptive target with the transition.
+# turns it on at this percentage (via `brightness_pct`), without transition, and
+# only then sends the adaptive target with the transition. A percentage avoids
+# raw brightness 1/255 being rounded down to 0 by percent-based integrations.
 FADE_IN_BRIGHTNESS = 1
 
 # Upper bound (seconds) for how long to wait for a light to report 'on' after
